@@ -1,121 +1,139 @@
-# train_dit.py
+#!/usr/bin/env python3
+"""
+train_diffusion.py - Train Diffusion Transformer for Floorplanning
+Usage: python train_diffusion.py
+"""
+
 import torch
 import torch.nn as nn
-import torch.optim as optim
+from torch.optim import AdamW
 from torch.utils.data import DataLoader
-import argparse
-import os
-from tqdm import tqdm
-from pathlib import Path
-
-# Add parent directory to path
 import sys
+from pathlib import Path
+import shutil
+
 sys.path.insert(0, str(Path(__file__).parent))
+from iccad2026_evaluate import (
+    get_training_dataloader,
+    compute_training_loss_differentiable,
+)
+from dit_model import DiffusionTransformer
+from dit_utils import DiffusionScheduler, q_sample
 
-from dit_model import ConditionEncoder, DiffusionTransformer
-from diffusion import GaussianDiffusion
-from iccad2026_evaluate import get_training_dataloader, compute_training_loss_differentiable
+def main():
 
-def train():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--save_dir', type=str, default='checkpoints')
-    parser.add_argument('--num_samples', type=int, default=None, help='Number of training samples (None = all 1M)')
-    args = parser.parse_args()
+    batch_size = 64
+    n_steps = 1000          # diffusion steps
+    learning_rate = 1e-5
+    epochs = 20
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    os.makedirs(args.save_dir, exist_ok=True)
+    print("Device is", "GPU" if torch.cuda.is_available() else "CPU")
 
-    # DataLoader
-    dataloader = get_training_dataloader(
-        data_path="../",  # adjust to your data path
-        batch_size=args.batch_size,
-        num_samples=args.num_samples,
+    train_loader = get_training_dataloader(
+        data_path="/home/xzy/eda/",
+        batch_size=batch_size,
+        num_samples=10000,
         shuffle=True
     )
-    print(f"Training samples: {len(dataloader.dataset)}")
 
-    # Models
-    cond_encoder = ConditionEncoder(feat_dim=64, hidden_dim=256).to(device)
-    diffusion_model = DiffusionTransformer(dim=256, depth=12, num_heads=8, cond_dim=256).to(device)
-    diffusion = GaussianDiffusion(num_timesteps=1000, schedule='cosine').to(device)
+    print("Get DataSet Successfully.")
+    
 
-    # Optimizer
-    optimizer = optim.AdamW(
-        list(cond_encoder.parameters()) + list(diffusion_model.parameters()),
-        lr=args.lr, weight_decay=0.01
-    )
+    model = DiffusionTransformer(
+        dim=512,
+        depth=8,
+        heads=8,
+        cond_dim=128,
+        n_steps=n_steps
+    ).to(device)
+    optimizer = AdamW(model.parameters(), lr=learning_rate)
+    print("Build DiT Arch Successfully.")
+    
+    scheduler = DiffusionScheduler(n_steps, beta_start=1e-4, beta_end=0.02)
+    alpha_cumprod = scheduler.alpha_cumprod.to(device)
+    print("Build DiT-Scheduler Successfully.")
+    print("Begin Training ...")
 
-    # Training loop
-    global_step = 0
-    for epoch in range(args.epochs):
+    # training loop
+    # save_dir = Path("model")
+    # save_dir.mkdir(exist_ok=True)
+    save_dir = Path("/home/xzy/eda/model")
+    save_dir.mkdir(parents=True, exist_ok=True)
+    norm_factor = 1000.0
+    for epoch in range(epochs):
         total_loss = 0.0
-        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
-        for batch in pbar:
-            # Unpack batch (8 tensors)
+        for batch_idx, batch in enumerate(train_loader):
             area_target, b2b_conn, p2b_conn, pins_pos, constraints, tree_sol, fp_sol, metrics = batch
-            # Move to device
+            # to device
             area_target = area_target.to(device)
             b2b_conn = b2b_conn.to(device)
             p2b_conn = p2b_conn.to(device)
             pins_pos = pins_pos.to(device)
             constraints = constraints.to(device)
+            fp_sol = fp_sol.to(device)
             metrics = metrics.to(device)
-            fp_sol = fp_sol.to(device)   # [bsz, max_blocks, 4] (w,h,x,y)
 
-            # Ground truth layout in [x,y,w,h] order
-            # fp_sol: [bsz, max_blocks, 4] = (w, h, x, y)
-            B, K, _ = fp_sol.shape
-            gt_layout = torch.stack([fp_sol[...,2], fp_sol[...,3], fp_sol[...,0], fp_sol[...,1]], dim=-1)  # [B,K,4] (x,y,w,h)
+            B, max_blocks, _ = fp_sol.shape
 
-            # Condition encoding
-            cond, mask = cond_encoder(area_target, constraints, b2b_conn, target_positions=None)
+            valid_mask = (area_target != -1)
+            mask = valid_mask.unsqueeze(-1).expand_as(fp_sol)  # [B, max_blocks, 4]
 
-            # Sample random timestep
-            t = torch.randint(0, diffusion.num_timesteps, (B,), device=device)
-            # Add noise to gt_layout
-            x_t, noise = diffusion.q_sample(gt_layout, t)
+            x0 = fp_sol / norm_factor
+            x0 = x0 * mask.float()
 
-            # Predict noise
-            noise_pred = diffusion_model(x_t, t, cond, mask)
+            t = torch.randint(0, n_steps, (B,), device=device)
+            noise = torch.randn_like(x0)
+            x_t, noise = q_sample(x0, t, alpha_cumprod, noise)
 
-            # Diffusion loss (MSE on valid blocks)
-            loss = F.mse_loss(noise_pred[mask], noise[mask])
+            pred_noise = model(x_t, t, area_target, b2b_conn, p2b_conn, pins_pos, constraints)
 
-            # Optional: Add differentiable contest loss as auxiliary
-            # This can be computed using the denoised prediction at t=0 (approximated)
-            # For simplicity we skip it here; you can add a weighted term.
+            # MSE loss only on valid positions
+            loss_mse = nn.functional.mse_loss(pred_noise * mask, noise * mask, reduction='sum')
+            loss_mse = loss_mse / (mask.sum() + 1e-6)
+            loss = loss_mse
 
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(diffusion_model.parameters(), 1.0)
-            torch.nn.utils.clip_grad_norm_(cond_encoder.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
             total_loss += loss.item()
-            pbar.set_postfix(loss=loss.item())
-            global_step += 1
+            if batch_idx % 50 == 0:
+                print(f"Epoch {epoch} Batch {batch_idx}: loss={loss.item():.4f}")
+            # ============================ test info ============================
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"Warning: NaN/Inf loss at epoch {epoch} batch {batch_idx}, skipping")
+                optimizer.zero_grad()
+                continue
 
-        avg_loss = total_loss / len(dataloader)
-        print(f"Epoch {epoch+1} avg loss: {avg_loss:.6f}")
+            if batch_idx == 0 and epoch == 0:
+                print(f"x0: min={x0.min().item():.4f}, max={x0.max().item():.4f}, mean={x0.mean().item():.4f}")
+                print(f"noise: min={noise.min().item():.4f}, max={noise.max().item():.4f}")
+                print(f"x_t: min={x_t.min().item():.4f}, max={x_t.max().item():.4f}")
+                print(f"pred_noise: min={pred_noise.min().item():.4f}, max={pred_noise.max().item():.4f}")
+                print(f"loss_mse: {loss_mse.item():.6f}")
+            # ============================ test info ============================
 
-        # Save checkpoint
-        if (epoch+1) % 10 == 0:
-            torch.save({
-                'epoch': epoch,
-                'cond_encoder': cond_encoder.state_dict(),
-                'diffusion_model': diffusion_model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-            }, os.path.join(args.save_dir, f'checkpoint_epoch{epoch+1}.pt'))
+        avg_loss = total_loss / len(train_loader)
+        print(f"Epoch {epoch} finished, avg loss={avg_loss:.4f}")
+        # torch.save(model.state_dict(), f"model/diffusion_epoch_{epoch}.pth")
+        torch.save(model.state_dict(), save_dir / f"diffusion_epoch_{epoch}.pth")
 
-    # Save final model
-    torch.save({
-        'cond_encoder': cond_encoder.state_dict(),
-        'diffusion_model': diffusion_model.state_dict(),
-    }, os.path.join(args.save_dir, 'final_model.pt'))
-    print("Training finished.")
+    # torch.save(model.state_dict(), "model/diffusion_final.pth")
+    torch.save(model.state_dict(), save_dir / "diffusion_final.pth")
+    print("Training done!")
 
-if __name__ == '__main__':
-    train()
+if __name__ == "__main__":
+
+    model_dir = Path("/home/xzy/eda/model")
+    if model_dir.exists():
+        for file in model_dir.iterdir():
+            if file.is_file():
+                file.unlink()
+        print(f"Cleaned old model files from {model_dir}")
+    else:
+        model_dir.mkdir(parents=True)
+        print(f"Created {model_dir} directory")
+
+    main()

@@ -1,191 +1,192 @@
-# dit_model.py
-import math
+# import torch
+# import torch.nn as nn
+# import math
+
+# class DiffusionTransformer(nn.Module):
+#     def __init__(self, dim=512, depth=8, heads=8, cond_dim=128, n_steps=1000):
+#         super().__init__()
+#         self.dim = dim
+#         # 时间步嵌入
+#         self.time_embed = nn.Sequential(
+#             nn.Linear(dim, dim*4),
+#             nn.SiLU(),
+#             nn.Linear(dim*4, dim)
+#         )
+#         # 条件投影（将面积、连接等编码为固定维向量）
+#         self.cond_proj = nn.Linear(cond_dim, dim)
+#         # 输入投影：每个模块的 (w,h,x,y) 4维 -> dim
+#         self.input_proj = nn.Linear(4, dim)
+#         # Transformer 编码器（处理序列）
+#         encoder_layer = nn.TransformerEncoderLayer(d_model=dim, nhead=heads, batch_first=True)
+#         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=depth)
+#         # 输出投影：dim -> 4
+#         self.output_proj = nn.Linear(dim, 4)
+
+#     def forward(self, x, t, area_target, b2b_conn, p2b_conn, pins_pos, constraints):
+#         """
+#         x: [B, N, 4] 带噪布局 (w,h,x,y)
+#         t: [B] 时间步
+#         其他条件张量见竞赛格式
+#         """
+#         B, N, _ = x.shape
+#         # 1. 时间步嵌入
+#         t_emb = self._time_embedding(t, self.dim)  # [B, dim]
+#         t_emb = t_emb.unsqueeze(1).expand(-1, N, -1)  # [B, N, dim]
+
+#         # 2. 条件编码（需要将多源条件融合为每个模块的 cond vector）
+#         # 这里简化：使用 area_target 的对数作为每个模块的条件
+#         cond = torch.log(area_target + 1).unsqueeze(-1)  # [B, N, 1]
+#         # 扩展为 cond_dim
+#         cond = cond.expand(-1, -1, self.cond_proj.in_features)  # 简单复制，实际应更复杂
+#         cond_emb = self.cond_proj(cond)  # [B, N, dim]
+
+#         # 3. 输入嵌入
+#         x_emb = self.input_proj(x)  # [B, N, dim]
+
+#         # 4. 相加并送入 Transformer
+#         tokens = x_emb + cond_emb + t_emb
+#         # Transformer 要求 (seq_len, batch, dim)，但 batch_first=True 已支持
+#         out = self.transformer(tokens)  # [B, N, dim]
+
+#         # 5. 预测噪声
+#         pred_noise = self.output_proj(out)  # [B, N, 4]
+
+#         return pred_noise
+
+#     def _time_embedding(self, t, dim):
+#         """ sinusoidal positional embedding for time steps """
+#         half = dim // 2
+#         freqs = torch.exp(-math.log(10000) * torch.arange(0, half, dtype=torch.float32) / half).to(t.device)
+#         args = t.unsqueeze(-1).float() * freqs[None]
+#         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+#         if dim % 2:
+#             embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+#         return embedding
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-# ----------------------------------------------------------------------
-# Positional Embedding
-# ----------------------------------------------------------------------
-class SinusoidalPositionalEmbedding(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, t):
-        half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=t.device) * -emb)
-        emb = t[:, None].float() * emb[None, :]
-        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
-        return emb
+import math
 
 
-# ----------------------------------------------------------------------
-# Cross-Attention Block (DiT building block)
-# ----------------------------------------------------------------------
-class CrossAttentionBlock(nn.Module):
-    def __init__(self, dim, num_heads=8, mlp_ratio=4.0):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(dim)
-        self.self_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
-        self.norm2 = nn.LayerNorm(dim)
-        self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
-        self.norm3 = nn.LayerNorm(dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, int(dim * mlp_ratio)),
-            nn.GELU(),
-            nn.Linear(int(dim * mlp_ratio), dim),
-        )
-
-    def forward(self, x, cond, mask=None, cond_mask=None):
-        # self-attention
-        x = x + self.self_attn(self.norm1(x), self.norm1(x), x, key_padding_mask=mask)[0]
-        # cross-attention with condition
-        x = x + self.cross_attn(self.norm2(x), cond, cond, key_padding_mask=cond_mask)[0]
-        # MLP
-        x = x + self.mlp(self.norm3(x))
-        return x
-
-
-# ----------------------------------------------------------------------
-# Condition Encoder (graph + area + constraints)
-# ----------------------------------------------------------------------
-class ConditionEncoder(nn.Module):
-    def __init__(self, feat_dim=64, hidden_dim=256, max_blocks=120):
-        super().__init__()
-        self.feat_dim = feat_dim
-        self.hidden_dim = hidden_dim
-
-        # module features: log(area) + is_fixed? + is_preplaced? (3 dims)
-        self.module_proj = nn.Linear(3, feat_dim)
-        # connection weight projection (average edge weight per node)
-        self.conn_proj = nn.Linear(1, feat_dim)
-        # learnable positional encoding (max_blocks)
-        self.pos_embed = nn.Embedding(max_blocks, feat_dim)
-
-        self.transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(feat_dim, nhead=8, batch_first=True),
-            num_layers=4
-        )
-
-    def forward(self, area_targets, constraints, b2b_connectivity, target_positions=None):
-        """
-        Args:
-            area_targets: torch.Tensor [B, K] (target area, -1 for padding)
-            constraints: torch.Tensor [B, K, 5] (fixed, preplaced, mib, cluster, boundary)
-            b2b_connectivity: torch.Tensor [B, E, 3] (i, j, weight)
-            target_positions: optional [B, K, 4] (x,y,w,h) for fixed/preplaced
-        Returns:
-            cond: [B, K, hidden_dim]
-            mask: [B, K] (True for valid blocks)
-        """
-        B, K = area_targets.shape
-        device = area_targets.device
-
-        # mask for valid blocks (area != -1)
-        valid_mask = (area_targets != -1).float()  # [B,K]
-
-        # Build module features: [log(area+1), is_fixed, is_preplaced]
-        log_area = torch.log(area_targets + 1e-6).unsqueeze(-1)  # [B,K,1]
-        is_fixed = (constraints[..., 0] != 0).float().unsqueeze(-1)  # [B,K,1]
-        is_preplaced = (constraints[..., 1] != 0).float().unsqueeze(-1)  # [B,K,1]
-        feat = torch.cat([log_area, is_fixed, is_preplaced], dim=-1)  # [B,K,3]
-        feat = self.module_proj(feat)  # [B,K,feat_dim]
-
-        # Add positional embedding
-        positions = torch.arange(K, device=device).unsqueeze(0).expand(B, -1)
-        feat = feat + self.pos_embed(positions)
-
-        # Graph information: average connection weight per node
-        # b2b_connectivity: [B, E, 3] -> compute node degree and weighted sum
-        # Simplified: for each node, average weight of all incident edges
-        conn_avg = torch.zeros(B, K, 1, device=device)
-        for b in range(B):
-            edges = b2b_connectivity[b]
-            valid_edges = edges[edges[:, 0] != -1]
-            if valid_edges.shape[0] > 0:
-                i = valid_edges[:, 0].long()
-                j = valid_edges[:, 1].long()
-                w = valid_edges[:, 2]
-                # accumulate weights
-                sum_w = torch.zeros(K, device=device)
-                cnt = torch.zeros(K, device=device)
-                sum_w.index_add_(0, i, w)
-                sum_w.index_add_(0, j, w)
-                cnt.index_add_(0, i, torch.ones_like(i).float())
-                cnt.index_add_(0, j, torch.ones_like(j).float())
-                avg = sum_w / (cnt + 1e-6)
-                conn_avg[b, :, 0] = avg
-        graph_feat = self.conn_proj(conn_avg)  # [B,K,feat_dim]
-        feat = feat + graph_feat
-
-        # Transformer encoding (only valid positions)
-        # We'll use a mask to ignore padding during attention
-        key_padding_mask = (valid_mask == 0)  # True for padding
-        # Convert to float and set padding to zero for attention stability
-        feat = feat * valid_mask.unsqueeze(-1)
-        cond = self.transformer(feat, src_key_padding_mask=key_padding_mask)  # [B,K,feat_dim]
-
-        # Project to hidden_dim
-        cond = nn.Linear(self.feat_dim, self.hidden_dim).to(device)(cond)
-        return cond, valid_mask.bool()
-
-
-# ----------------------------------------------------------------------
-# Diffusion Transformer Model
-# ----------------------------------------------------------------------
 class DiffusionTransformer(nn.Module):
     """
-    Predicts noise from noisy layout + timestep + condition.
-    Input: x [B, K, 4], t [B], cond [B, K, cond_dim]
-    Output: noise_pred [B, K, 4]
+    Diffusion Transformer model that predicts noise from noisy layout and conditions.
     """
-    def __init__(self, dim=256, depth=12, num_heads=8, cond_dim=256):
+    def __init__(
+        self,
+        dim: int = 512,
+        depth: int = 8,
+        heads: int = 8,
+        cond_dim: int = 128,
+        n_steps: int = 1000,
+        dropout: float = 0.1
+    ):
         super().__init__()
         self.dim = dim
-        self.time_mlp = nn.Sequential(
-            SinusoidalPositionalEmbedding(dim),
-            nn.Linear(dim, dim),
-            nn.GELU(),
-            nn.Linear(dim, dim),
-        )
-        self.input_proj = nn.Linear(4, dim)
-        self.cond_proj = nn.Linear(cond_dim, dim)
+        self.depth = depth
+        self.heads = heads
+        self.cond_dim = cond_dim
+        self.n_steps = n_steps
 
-        self.blocks = nn.ModuleList([
-            CrossAttentionBlock(dim, num_heads) for _ in range(depth)
-        ])
+        self.pos_embed = nn.Parameter(torch.randn(1, 1000, dim) * 0.02, requires_grad=True)
+
+        # 时间步嵌入
+        self.time_embed = nn.Sequential(
+            nn.Linear(dim, dim * 4),   # 注意：这里 dim 是 int，可以乘法
+            nn.SiLU(),
+            nn.Linear(dim * 4, dim)
+        )
+
+        # 条件投影（将每个模块的原始条件映射到 dim）
+        self.cond_proj = nn.Sequential(
+            nn.Linear(cond_dim, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim)
+        )
+
+        # 输入投影：每个模块的 (w, h, x, y) → dim
+        self.input_proj = nn.Linear(4, dim)
+
+        # Transformer 编码器（处理序列）
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=dim,
+            nhead=heads,
+            dim_feedforward=dim * 4,
+            dropout=dropout,
+            batch_first=True,
+            activation='gelu'
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=depth)
+
+        # 输出投影：dim → 4 (预测噪声)
         self.output_proj = nn.Sequential(
             nn.Linear(dim, dim),
             nn.GELU(),
-            nn.Linear(dim, 4),
+            nn.Linear(dim, 4)
         )
 
-    def forward(self, x, t, cond, mask=None):
-        """
-        x: [B, K, 4]
-        t: [B]
-        cond: [B, K, cond_dim]
-        mask: [B, K] (True for valid blocks)
-        """
-        x = self.input_proj(x)          # [B,K,dim]
-        t_emb = self.time_mlp(t).unsqueeze(1)   # [B,1,dim]
-        x = x + t_emb
+        # 初始化
+        self._init_weights()
 
-        cond = self.cond_proj(cond)      # [B,K,dim]
+    def _init_weights(self):
+        """初始化权重，避免数值过大导致 nan"""
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p, gain=0.02)
 
-        # apply mask: if mask is provided, we set padded positions to zero
-        if mask is not None:
-            mask_pad = ~mask  # True for padding
-            x = x.masked_fill(mask_pad.unsqueeze(-1), 0)
-            # For attention, we need key_padding_mask: True for padded tokens
-            key_padding_mask = mask_pad
+    def forward(self, x, t, area_target, b2b_conn, p2b_conn, pins_pos, constraints):
+        """
+        Args:
+            x: [B, N, 4] 带噪布局 (w, h, x, y)
+            t: [B] 时间步索引
+            area_target: [B, N] 模块目标面积 (未归一化)
+            b2b_conn, p2b_conn, pins_pos, constraints: 条件信息
+        Returns:
+            pred_noise: [B, N, 4]
+        """
+        B, N, _ = x.shape
+        device = x.device
+
+        # 1. 时间步嵌入
+        t_emb = self._time_embedding(t, self.dim)  # [B, dim]
+        t_emb = t_emb.unsqueeze(1).expand(-1, N, -1)  # [B, N, dim]
+
+        # 2. 条件编码（简化版：只用面积作为条件）
+        valid_mask = (area_target != -1).float()  # [B, N]
+        safe_area = torch.where(area_target > 0, area_target, torch.ones_like(area_target))
+        log_area = torch.log(safe_area) * valid_mask
+        cond_feat = log_area.unsqueeze(-1)  # [B, N, 1]
+        # 扩展为 cond_dim
+        cond_feat = cond_feat.expand(-1, -1, self.cond_dim)
+        cond_emb = self.cond_proj(cond_feat)
+
+        # 3. 输入嵌入
+        x_emb = self.input_proj(x)
+
+        # 4. 相加并加位置编码
+        tokens = x_emb + cond_emb + t_emb
+        if not hasattr(self, 'pos_embed'):
+            # 动态创建位置编码，确保与 tokens 同设备
+            self.pos_embed = nn.Parameter(torch.randn(1, N, self.dim) * 0.02).to(device)
         else:
-            key_padding_mask = None
+            # 如果预定义的 pos_embed 长度不足，扩展它
+            if self.pos_embed.shape[1] < N:
+                new_embed = torch.randn(1, N - self.pos_embed.shape[1], self.dim) * 0.02
+                self.pos_embed = nn.Parameter(torch.cat([self.pos_embed, new_embed.to(device)], dim=1))
+        tokens = tokens + self.pos_embed[:, :N, :]
 
-        for block in self.blocks:
-            x = block(x, cond, mask=key_padding_mask)
+        out = self.transformer(tokens)
+        pred_noise = self.output_proj(out)
+        return pred_noise
 
-        noise_pred = self.output_proj(x)
-        return noise_pred
+    def _time_embedding(self, t, dim):
+        """正弦余弦时间嵌入"""
+        half = dim // 2
+        freqs = torch.exp(
+            -math.log(10000) * torch.arange(0, half, dtype=torch.float32) / half
+        ).to(t.device)
+        args = t.unsqueeze(-1).float() * freqs[None]  # [B, half]
+        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)  # [B, dim]
+        if dim % 2:
+            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+        return embedding
