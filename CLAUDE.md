@@ -36,7 +36,7 @@ cd iccad2026contest
 # Quick start — copy the B*-tree SA baseline, then evaluate
 cp optimizer_template.py my_optimizer.py
 python iccad2026_evaluate.py --evaluate my_optimizer.py              # Full validation set
-python iccad2026_evaluate.py --evaluate my_optimizer.py --test-id 0  # Single test case
+python iccad2026_evaluate.py --evaluate my_optimizer.py --test-id 0  # Single test case (0-99)
 python iccad2026_evaluate.py --validate my_optimizer.py              # Format check (no eval)
 python iccad2026_evaluate.py --validate my_optimizer.py --quick      # Format check (skip run)
 
@@ -48,9 +48,18 @@ python iccad2026_evaluate.py --score my_optimizer_solutions.json
 python iccad2026_evaluate.py --baseline --output baselines.json
 python iccad2026_evaluate.py --training
 python iccad2026_evaluate.py --visualize --test-id 0
+python iccad2026_evaluate.py --info                                    # Show scoring formula
 
 # Differentiable training demo
 python training_example.py
+
+# Inspect raw dataset fields / shapes (training + test samples)
+python check_input.py --mode train --root /home/xzy/eda/FloorSet --worker-idx 3 --layout-idx 2
+python check_input.py --mode test  --root /home/xzy/eda/FloorSet --config-idx 21 --input-idx 1
+
+# Diffusion-Transformer (DiT) approach
+python train_dit.py                  # Train DiT on training subset (GPU recommended)
+python iccad2026_evaluate.py --evaluate dit_optimizer.py   # Evaluate a trained DiT
 ```
 
 Legacy top-level loaders (not part of contest workflow, used by `*.py` notebook-style scripts):
@@ -92,6 +101,17 @@ The repo contains the broader FloorSet research framework AND the ICCAD 2026 con
   - Baseline optimizers included for reference: `RandomOptimizer`, `SimulatedAnnealingOptimizer` (NOT the official baseline — see `optimizer_template.py` for the B*-tree SA)
 - `optimizer_template.py` → the **canonical starting point**. Provides a working `BStarTree` + SA baseline as `MyOptimizer(FloorplanOptimizer)`. Contestants are expected to subclass `FloorplanOptimizer` and rewrite `solve()`.
 - `training_example.py` → end-to-end demo of differentiable loss, gradient flow, and dataloader unpacking
+
+**DiT (Diffusion Transformer) approach — in-repo ML baseline:**
+- `dit_model.py` → `DiffusionTransformer` (DiT) — takes noisy layout `[B,N,4]` + timestep + conditions, predicts noise. Backbone: 8-layer TransformerEncoder (dim=512, heads=8) with time/cond embeddings, projects to `(w,h,x,y)`. Default config: `n_steps=1000`, `norm_factor=1000.0` (must match between training and inference).
+- `dit_utils.py` → `DiffusionScheduler`, `q_sample` — DDPM noise schedule and forward diffusion.
+- `dit_optimizer.py` → `MyOptimizer(FloorplanOptimizer)` wrapper that loads `diffusion_final.pth` from `/home/xzy/eda/model/` (fallback: `iccad2026contest/diffusion_final.pth`) and runs DDPM reverse sampling to produce `(x,y,w,h)` per block. Device auto-selects CUDA when available.
+- `train_dit.py` → trains the DiT using `get_training_dataloader(...)` + `compute_training_loss_differentiable(...)`. Defaults: `batch_size=64`, `n_steps=1000`, `lr=1e-5`, `epochs=20`, reads data from `/home/xzy/eda/`. GPU strongly recommended.
+- `check_input.py` → CLI helper that loads a single training/validation sample and prints raw fields, shapes, dtypes, and a small preview (handy when wiring a new model).
+
+**Other supporting files in `iccad2026contest/`:**
+- `requirements.txt` → Python deps for the contest workflow (separate from top-level `requirements.txt`).
+- `scripts/`, `inputdata_md/` → currently empty scaffolding directories (intentionally empty for future use).
 
 ### Optimizer Contract
 
