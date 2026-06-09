@@ -34,7 +34,7 @@ class MyOptimizer(FloorplanOptimizer):
         """加载预训练的扩散模型"""
         # 尝试加载模型权重，支持 model/ 目录或当前目录
         # model_path = Path(__file__).parent / "model" / "diffusion_final.pth"
-        model_path = Path("/home/xzy/eda/model/diffusion_final.pth")
+        model_path = Path("/home/xzy/eda/model/v1/diffusion_final.pth")
         if not model_path.exists():
             model_path = Path(__file__).parent / "diffusion_final.pth"
         

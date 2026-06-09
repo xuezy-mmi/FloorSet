@@ -58,7 +58,7 @@ def main():
     # training loop
     # save_dir = Path("model")
     # save_dir.mkdir(exist_ok=True)
-    save_dir = Path("/home/xzy/eda/model")
+    save_dir = Path("/home/xzy/eda/model/v1")
     save_dir.mkdir(parents=True, exist_ok=True)
     norm_factor = 1000.0
     for epoch in range(epochs):
@@ -126,7 +126,7 @@ def main():
 
 if __name__ == "__main__":
 
-    model_dir = Path("/home/xzy/eda/model")
+    model_dir = Path("/home/xzy/eda/model/v1")
     if model_dir.exists():
         for file in model_dir.iterdir():
             if file.is_file():
