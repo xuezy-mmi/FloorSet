@@ -37,7 +37,7 @@ from iccad2026_evaluate import (
 CONFIG = {
     "optimizer_file":    "dit_optimizer_v3.py",   # path (relative to iccad2026contest/) of the optimizer
     "data_path":         "../",                   # FloorSet data root for the validator
-    "test_ids":          [0, 1, 2, 3, 4],         # validation case indices to plot
+    "test_ids":          [0, 1, 2, 3, 4, 20, 40, 60, 80, 99],         # validation case indices to plot
     "out_dir":           "fig",                   # output directory for PNGs
     "filename_prefix":   "v3",                    # output filename prefix: <prefix>_<test_id>.png
     "show":              False,                   # whether to also display the figures
