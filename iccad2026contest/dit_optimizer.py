@@ -21,7 +21,8 @@ from iccad2026_evaluate import FloorplanOptimizer, check_overlap
 from dit_model_v3 import DiffusionTransformer
 from dit_utils_v3 import CosineSchedule
 
-CKPT_PATH = Path("/home/xzy/eda/model/v3/diffusion_final.pth")
+CKPT_PATH = Path("/home/xzy/eda/FloorSet/iccad2026contest/model/v3/diffusion_final.pth")
+# CKPT_PATH = Path("/home/xzy/eda/model/v3/diffusion_final.pth")
 N_DDIM_STEPS = 50
 N_SAMPLES = 4  # number of DDIM samples to try per case
 

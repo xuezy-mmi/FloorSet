@@ -38,8 +38,8 @@ from iccad2026_evaluate import (
 from dit_model_v3 import DiffusionTransformer
 from dit_utils_v3 import CosineSchedule
 
-
-CKPT_PATH = Path("/home/xzy/eda/model/v3/diffusion_final.pth")
+CKPT_PATH = Path("/home/xzy/eda/FloorSet/iccad2026contest/model/v3/diffusion_final.pth")
+# CKPT_PATH = Path("/home/xzy/eda/model/v3/diffusion_final.pth")
 N_DDIM_STEPS = 50
 SA_TIME_BUDGET_S = 1.5
 SA_INITIAL_TEMP = 60.0
