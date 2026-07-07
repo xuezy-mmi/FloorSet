@@ -77,9 +77,9 @@ SAVE_DIR.mkdir(parents=True, exist_ok=True)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 N_STEPS = 1000
 N_EPOCHS = 20
-BATCH_SIZE = 8
+BATCH_SIZE = 64
 LR = 2e-4
-NUM_SAMPLES = 500000
+NUM_SAMPLES = 200000
 LAMBDA_NOISE = 0.05
 LAMBDA_HARD = 1.0
 GRAD_CLIP = 1.0

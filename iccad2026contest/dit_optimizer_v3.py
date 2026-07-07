@@ -47,9 +47,6 @@ SA_COOLING_RATE = 0.9
 SA_MOVES_PER_TEMP = 8
 
 
-# ---------------------------------------------------------------------------
-# B*-tree (replicated from dit_optimizer_v2_sa.py; locked-block aware)
-# ---------------------------------------------------------------------------
 class BStarTree:
     def __init__(self, n_blocks, widths, heights, root_index=0, locked=None):
         self.n = n_blocks
